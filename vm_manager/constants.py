@@ -7,29 +7,6 @@ SCRIPT_OKAY = 1
 
 ERROR = -1
 
-# These are Openstack Nova server status values that the
-# python client library doesn't define constants for.
-ACTIVE = "ACTIVE"
-BUILD = "BUILD"
-REBOOT = "REBOOT"
-REBUILD = "REBUILD"
-RESCUE = "RESCUE"
-RESIZE = "RESIZE"
-SHUTDOWN = "SHUTOFF"
-VERIFY_RESIZE = "VERIFY_RESIZE"
-MISSING = "MISSING"
-# (There are more ...)
-
-# These are Openstack Cinder status values that the
-# python client library doesn't define constants for.
-VOLUME_AVAILABLE = "available"
-VOLUME_IN_USE = "in-use"
-VOLUME_CREATING = "creating"
-
-BACKUP_AVAILABLE = "available"
-BACKUP_CREATING = "creating"
-# (There are more ...)
-
 NO_VM = VM_DELETED = "No_VM"
 VM_WAITING = VM_CREATING = VM_RESIZING = "VM_Waiting"
 VM_OKAY = "VM_Okay"

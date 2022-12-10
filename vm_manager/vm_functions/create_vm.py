@@ -1,4 +1,3 @@
-import copy
 import crypt
 from datetime import datetime, timedelta
 import logging
@@ -11,11 +10,14 @@ from django.template.loader import render_to_string
 from django.urls import reverse
 from django.utils.timezone import utc
 
-from vm_manager.constants import VOLUME_CREATION_TIMEOUT, \
-    INSTANCE_LAUNCH_TIMEOUT, NO_VM, VM_SHELVED, VOLUME_AVAILABLE, ACTIVE
+from vm_manager.cloud.connector.connector import get_cloud_connector
+from vm_manager.cloud.connector.objects import Volume as CloudVolume, Network, \
+    ServerStatus
+from vm_manager.cloud.connector.objects import VolumeStatus
+from vm_manager.cloud.environment.environment import get_cloud_environment
+from vm_manager.constants import NO_VM, VM_SHELVED, VOLUME_CREATION_TIMEOUT, \
+    INSTANCE_LAUNCH_TIMEOUT
 from vm_manager.utils.expiry import InstanceExpiryPolicy
-from vm_manager.utils.utils import get_nectar, generate_server_name, \
-    generate_hostname, generate_password
 from vm_manager.models import Instance, Volume, VMStatus
 
 from researcher_desktop.models import AvailabilityZone
@@ -55,24 +57,27 @@ def _create_volume(user, desktop_type, zone):
     if volume:
         # Check that the volume still exists in Cinder, and that it
         # has status 'available', and is in the expected AZ.
-        n = get_nectar()
-        try:
-            cinder_volume = n.cinder.volumes.get(volume.id)
-            if cinder_volume.status != VOLUME_AVAILABLE:
-                logger.error(f"Cinder volume for {volume} in wrong state "
-                             f"{cinder_volume.status}. Needs manual cleanup.")
-                volume.error(f"Cinder volume in state {cinder_volume.status}")
-                return None
-            if cinder_volume.availability_zone != zone.name:
-                logger.error(f"Cinder volume for {volume} in wrong AZ. "
-                             "Needs manual cleanup")
-                volume.error("Cinder volume in wrong AZ")
-                return None
-        except cinderclient.exceptions.NotFound:
+        cloud = get_cloud_connector()
+        cloud_volume = CloudVolume.create(volume)
+        volume_exist = cloud.is_volume_created(volume)
+        if volume_exist is None or volume_exist is False:
             logger.error(f"Cinder volume missing for {volume}. "
                          "Needs manual cleanup.")
             volume.error("Cinder volume missing")
             return None
+        else:
+            cloud_volume_status = cloud.get_volume_status(cloud_volume)
+            if cloud_volume_status != VolumeStatus.AVAILABLE:
+                logger.error(f"Cinder volume for {volume} in wrong state "
+                             f"{cloud_volume_status}. Needs manual cleanup.")
+                volume.error(f"Cinder volume in state {cloud_volume_status}")
+                return None
+            cloud_volume_zone = cloud.get_volume_zone(cloud_volume)
+            if cloud_volume_zone != zone.name:
+                logger.error(f"Cinder volume for {volume} in wrong AZ. "
+                             "Needs manual cleanup")
+                volume.error("Cinder volume in wrong AZ")
+                return None
 
         vm_status = VMStatus.objects.get_vm_status_by_volume(
             volume, requesting_feature)
@@ -102,47 +107,44 @@ def _create_volume(user, desktop_type, zone):
         vm_status.status_message = 'Creating volume'
         vm_status.save()
 
-    name = generate_server_name(user.username, desktop_id)
-    source_volume_id = _get_source_volume_id(desktop_type, zone)
+    cenv = get_cloud_environment()
+    name = cenv.generate_server_name(user.username, desktop_id)
+    cloud_source_volume = _get_source_volume(desktop_type, zone)
 
-    n = get_nectar()
-    volume_result = n.cinder.volumes.create(
-        source_volid=source_volume_id,
-        size=desktop_type.volume_size,
-        name=name,
-        metadata={'readonly': 'False'},
-        availability_zone=zone.name)
-    n.cinder.volumes.set_bootable(volume=volume_result, flag=True)
+    cloud_volume_metadata = {
+        'hostname': cenv.generate_hostname(volume.hostname_id, desktop_id),
+        'user': user.email,
+        'desktop': desktop_id,
+        'environment': settings.ENVIRONMENT_NAME,
+        'requesting_feature': requesting_feature.name,
+    }
+
+    cloud = get_cloud_connector()
+    cloud_volume = cloud.create_volume(name=name,
+                                       size=desktop_type.volume_size,
+                                       source_volume=cloud_source_volume,
+                                       metadata=cloud_volume_metadata,
+                                       zone=zone.name)
 
     # Create record in DB
     volume = Volume(
-        id=volume_result.id, user=user,
-        image=source_volume_id,
+        id=cloud_volume.id, user=user,
+        image=cloud_source_volume.id,
         requesting_feature=requesting_feature,
         operating_system=desktop_id,
         zone=zone.name,
         flavor=desktop_type.default_flavor.id)
     volume.save()
 
-    # Add the volume's hostname to the volume's metadata on openstack
-    n.cinder.volumes.set_metadata(
-        volume=volume_result,
-        metadata={
-            'hostname': generate_hostname(volume.hostname_id, desktop_id),
-            'user': user.email,
-            'desktop': desktop_id,
-            'environment': settings.ENVIRONMENT_NAME,
-            'requesting_feature': requesting_feature.name,
-        })
     return volume
 
 
-def _get_source_volume_id(desktop_type, zone):
-    n = get_nectar()
-    res = n.cinder.volumes.list(
+def _get_source_volume(desktop_type, zone):
+    cloud = get_cloud_connector()
+    res = cloud.get_volume_list(
         search_opts={'name~': desktop_type.image_name,
                      'availability_zone': zone.name,
-                     'status': VOLUME_AVAILABLE})
+                     'status': VolumeStatus.AVAILABLE.name})
     # The 'name~' is supposed to be a "fuzzy match", but it doesn't work
     # as expected.  (Maybe it is a Cinder config thing?)  At any rate,
     # even if it did work, we still need to do our own filtering to
@@ -164,17 +166,17 @@ def _get_source_volume_id(desktop_type, zone):
     match = matches[0]
     logger.debug(f"Found source volume: {match.name} ({match.id}) in "
                  f"availability zone {zone.name}")
-    return match.id
+    return match
 
 
 def wait_to_create_instance(user, desktop_type, volume, start_time):
-    n = get_nectar()
+    cloud = get_cloud_connector()
     now = datetime.now(utc)
-    openstack_volume = n.cinder.volumes.get(volume_id=volume.id)
-    logger.info(f"Volume created in {now-start_time}s; "
-                f"volume status is {openstack_volume.status}")
+    volume_status = cloud.get_volume_status(volume.id)
+    logger.info(f"Volume created in {now - start_time}s; "
+                f"volume status is {volume_status}")
 
-    if openstack_volume.status == VOLUME_AVAILABLE:
+    if volume_status == VolumeStatus.AVAILABLE:
         instance = _create_instance(user, desktop_type, volume)
         vm_status = VMStatus.objects.get_latest_vm_status(user, desktop_type)
         vm_status.instance = instance
@@ -198,7 +200,7 @@ def wait_to_create_instance(user, desktop_type, volume, start_time):
     elif (now - start_time > timedelta(seconds=VOLUME_CREATION_TIMEOUT)):
         logger.error(f"Volume took too long to create: user:{user} "
                      f"desktop_id:{desktop_type.id} volume:{volume} "
-                     f"volume.status:{openstack_volume.status} "
+                     f"volume.status:{volume_status} "
                      f"start_time:{start_time} "
                      f"datetime.now:{now}")
         msg = "Volume took too long to create"
@@ -217,10 +219,11 @@ def wait_to_create_instance(user, desktop_type, volume, start_time):
 
 
 def _create_instance(user, desktop_type, volume):
-    n = get_nectar()
+    cloud = get_cloud_connector()
+    cenv = get_cloud_environment()
     desktop_id = desktop_type.id
-    hostname = generate_hostname(volume.hostname_id, desktop_id)
-    name = generate_server_name(user.username, desktop_id)
+    hostname = cenv.generate_hostname(volume.hostname_id, desktop_id)
+    name = cenv.generate_server_name(user.username, desktop_id)
 
     # Reuse the previous username and password
     last_instance = Instance.objects.get_latest_instance_for_volume(volume)
@@ -229,7 +232,7 @@ def _create_instance(user, desktop_type, volume):
         password = last_instance.password
     else:
         username = 'vdiuser'
-        password = generate_password()
+        password = cenv.generate_password()
 
     metadata_server = {
         'allow_user': user.username,
@@ -237,17 +240,9 @@ def _create_instance(user, desktop_type, volume):
         'requesting_feature': desktop_type.feature.name,
     }
 
-    block_device_mapping = [{
-        'source_type': "volume",
-        'destination_type': 'volume',
-        'delete_on_termination': False,
-        'uuid': volume.id,
-        'boot_index': '0',
-    }]
-
     zone = volume.zone
     network_id = AvailabilityZone.objects.get(name=zone).network_id
-    nics = [{'net-id': network_id}]
+    nics = [Network(id=network_id)]
 
     desktop_timezone = user.profile.timezone or settings.TIME_ZONE
     user_data_context = {
@@ -264,18 +259,17 @@ def _create_instance(user, desktop_type, volume):
                                  user_data_context)
 
     # Create instance in OpenStack
-    launch_result = n.nova.servers.create(
+    cloud_volume = CloudVolume.create(volume)
+    server = cloud.create_server(
         name=name,
-        image='',
         flavor=desktop_type.default_flavor.id,
+        volume=cloud_volume,
         userdata=user_data,
         security_groups=desktop_type.security_groups,
-        block_device_mapping_v2=block_device_mapping,
-        nics=nics,
-        availability_zone=zone,
-        meta=metadata_server,
-        key_name=settings.OS_KEYNAME,
-    )
+        networks=nics,
+        zone=zone,
+        metadata=metadata_server,
+        key_name=settings.OS_KEYNAME)
 
     # Create guac connection
     full_name = user.get_full_name()
@@ -286,7 +280,7 @@ def _create_instance(user, desktop_type, volume):
 
     # Create record in DB
     instance = Instance.objects.create(
-        id=launch_result.id, user=user, boot_volume=volume,
+        id=server.id, user=user, boot_volume=volume,
         guac_connection=guac_connection,
         username=username,
         password=password)
@@ -299,7 +293,7 @@ def _create_instance(user, desktop_type, volume):
 def wait_for_instance_active(user, desktop_type, instance, start_time):
     now = datetime.now(utc)
     if instance.check_active_status():
-        logger.info(f"Instance {instance.id} is now {ACTIVE}")
+        logger.info(f"Instance {instance.id} is now {ServerStatus.ACTIVE.name}")
         vm_status = VMStatus.objects.get_vm_status_by_instance(
             instance, desktop_type.feature)
         vm_status.status_progress = 75

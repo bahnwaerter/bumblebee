@@ -215,7 +215,7 @@ class InstanceModelTests(VMManagerModelTestBase):
 
     def test_get_instance(self):
         self.assertIsNone(
-            Instance.objects.get_instance(self.user, self.desktop_type))
+            get_instance(self.user, self.desktop_type))
 
         fake_volume = self.make_volume()
         fake_instance = InstanceFactory.create(
@@ -223,14 +223,14 @@ class InstanceModelTests(VMManagerModelTestBase):
 
         self.assertEqual(
             fake_instance,
-            Instance.objects.get_instance(self.user, self.desktop_type))
+            get_instance(self.user, self.desktop_type))
 
         # This is badness for testing
         fake_instance_2 = InstanceFactory.create(
             id=uuid.uuid4(), user=self.user, boot_volume=fake_volume)
 
         with self.assertRaises(Instance.MultipleObjectsReturned) as cm:
-            Instance.objects.get_instance(self.user, self.desktop_type)
+            get_instance(self.user, self.desktop_type)
         self.assertEqual(f"Multiple current instances found in the database "
                          f"with user={self.user} and "
                          f"os={self.desktop_type.name}",

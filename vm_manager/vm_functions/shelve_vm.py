@@ -6,7 +6,10 @@ import novaclient
 
 from django.utils.timezone import utc
 
-from vm_manager.constants import ACTIVE, SHUTDOWN, \
+from vm_manager.cloud.connector.connector import get_cloud_connector
+from vm_manager.cloud.connector.objects import ServerStatus, Server
+from vm_manager.cloud.environment.environment import get_cloud_environment
+from vm_manager.constants import \
     VM_MISSING, VM_SHELVED, VM_WAITING, VM_OKAY, VM_ERROR, VM_SUPERSIZED, \
     INSTANCE_DELETION_RETRY_WAIT_TIME, INSTANCE_DELETION_RETRY_COUNT, \
     INSTANCE_CHECK_SHUTOFF_RETRY_WAIT_TIME, \
@@ -15,7 +18,6 @@ from vm_manager.constants import ACTIVE, SHUTDOWN, \
 from vm_manager.models import VMStatus, Expiration, EXP_EXPIRING, \
     EXP_EXPIRY_FAILED, EXP_EXPIRY_FAILED_RETRYABLE, EXP_EXPIRY_COMPLETED
 from vm_manager.utils.expiry import VolumeExpiryPolicy
-from vm_manager.utils.utils import get_nectar, after_time
 from vm_manager.vm_functions.create_vm import launch_vm_worker
 from vm_manager.vm_functions.delete_vm import \
     _check_instance_is_shutoff_and_delete
@@ -37,10 +39,10 @@ def shelve_vm_worker(instance):
     vm_status = VMStatus.objects.get_vm_status_by_instance(
         instance, None, allow_missing=True)
 
-    n = get_nectar()
+    cloud = get_cloud_connector()
     try:
-        status = n.nova.servers.get(instance.id).status
-        if status not in (ACTIVE, SHUTDOWN):
+        status = cloud.get_server_status(Server(id=instance.id))
+        if status not in (ServerStatus.ACTIVE, ServerStatus.SHUTOFF):
             logger.error(f"Nova instance for {instance} is in unexpected "
                          f"state {status}.  Needs manual cleanup.")
             instance.error(f"Nova instance is {status}")
@@ -60,9 +62,9 @@ def shelve_vm_worker(instance):
         logger.exception("Instance get failed - {instance}")
         return _end_shelve(instance, WF_FAIL)
 
-    if status == ACTIVE:
+    if status == ServerStatus.ACTIVE:
         try:
-            n.nova.servers.stop(instance.id)
+            cloud.stop_server(Server(id=instance.id))
         except novaclient.exceptions.ClientException:
             logger.exception("Instance stop failed - {instance}")
             return _end_shelve(instance, WF_FAIL)
@@ -70,8 +72,9 @@ def shelve_vm_worker(instance):
         logger.info(f"Instance {instance} already shutdown in Nova.")
 
     if vm_status:
+        cenv = get_cloud_environment()
         vm_status.status = VM_WAITING
-        vm_status.wait_time = after_time(FORCED_SHELVE_WAIT_SECONDS)
+        vm_status.wait_time = cenv.after_time(FORCED_SHELVE_WAIT_SECONDS)
         vm_status.status_progress = 33
         vm_status.status_message = 'Instance stopping'
         vm_status.save()
@@ -88,9 +91,9 @@ def shelve_vm_worker(instance):
 
 
 def _confirm_instance_deleted(instance, retries):
-    n = get_nectar()
+    cloud = get_cloud_connector()
     try:
-        my_instance = n.nova.servers.get(instance.id)
+        my_instance = cloud.is_server_created(Server(id=instance.id))
         logger.debug(f"Instance delete status is retries: {retries} "
                      f"openstack instance: {my_instance}")
     except novaclient.exceptions.NotFound:

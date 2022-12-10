@@ -12,9 +12,8 @@ from vm_manager.tests.factories import ResizeFactory
 from vm_manager.tests.fakes import FakeServer, FakeNectar
 from vm_manager.tests.unit.vm_functions.base import VMFunctionTestBase
 
-from vm_manager.constants import ACTIVE, SHUTDOWN, RESIZE, VERIFY_RESIZE, \
-    RESCUE, VM_ERROR, VM_RESIZING, VM_OKAY, VM_WAITING, VM_SUPERSIZED, \
-    RESIZE_CONFIRM_WAIT_SECONDS, FORCED_DOWNSIZE_WAIT_SECONDS, \
+from vm_manager.constants import VM_ERROR, VM_RESIZING, VM_OKAY, VM_WAITING, \
+    VM_SUPERSIZED, RESIZE_CONFIRM_WAIT_SECONDS, FORCED_DOWNSIZE_WAIT_SECONDS, \
     WF_SUCCESS, WF_FAIL, WF_STARTED, WF_CONTINUE
 from vm_manager.models import VMStatus, Resize, Instance
 from vm_manager.vm_functions.resize_vm import supersize_vm_worker, \

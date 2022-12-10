@@ -10,14 +10,11 @@ from django.http import Http404
 from django.template.defaultfilters import safe
 from django.utils.timezone import utc
 
-from novaclient import exceptions as nova_exceptions
-
 from researcher_workspace.models import Feature, User
 from researcher_desktop.models import DesktopType
-from vm_manager.constants import ERROR, ACTIVE, SHUTDOWN, VERIFY_RESIZE, \
-    RESIZE, MISSING, VM_ERROR, VM_DELETED
-
-from vm_manager.utils.utils import get_nectar
+from vm_manager.cloud.connector.connector import get_cloud_connector
+from vm_manager.cloud.connector.objects import Server, ServerStatus
+from vm_manager.constants import ERROR, VM_ERROR, VM_DELETED
 
 from guacamole.models import GuacamoleConnection, \
     GuacamoleConnectionParameter, GuacamoleConnectionPermission, \
@@ -170,8 +167,8 @@ class Volume(CloudResource):
                 logger.error(
                     f"Could not assign random value to volume "
                     f"{self.id} for user {self.user}")
-                n = get_nectar()
-                n.cinder.volumes.delete(self.id)
+                cloud = get_cloud_connector()
+                cloud.delete_volume(self.id)
                 raise ValueError("Could not assign random value to volume")
             self.hostname_id = hostname_id
         super().save(*args, **kwargs)
@@ -305,6 +302,7 @@ class InstanceManager(models.Manager):
 class Instance(CloudResource):
     boot_volume = models.ForeignKey(Volume, on_delete=models.PROTECT, )
     ip_address = models.GenericIPAddressField(null=True, blank=True)
+    port = models.PositiveIntegerField(null=True, blank=True)
     guac_connection = models.ForeignKey(GuacamoleConnection,
         on_delete=models.SET_NULL, null=True, blank=True)
     username = models.CharField(max_length=20)
@@ -312,20 +310,28 @@ class Instance(CloudResource):
 
     objects = InstanceManager()
 
-    def get_ip_addr(self):
+    def get_console_ip_addr(self):
         if self.ip_address:
             return self.ip_address
         else:
-            n = get_nectar()
-            nova_server = n.nova.servers.get(self.id)
-            for key in nova_server.addresses:
-                self.ip_address = nova_server.addresses[key][0]['addr']
-                self.save()
+            cloud = get_cloud_connector()
+            self.ip_address = cloud.get_console_host()
+            self.save()
             return self.ip_address
+
+    def get_console_port(self):
+        if self.port:
+            return self.port
+        else:
+            cloud = get_cloud_connector()
+            self.port = cloud.get_console_port()
+            self.save()
+            return self.port
 
     def create_guac_connection(self):
         params = [
-            ('hostname', self.get_ip_addr()),
+            ('hostname', self.get_console_ip_addr()),
+            ('port', self.get_console_port()),
             ('username', self.username),
             ('password', self.password),
             ('security', 'tls'),
@@ -364,27 +370,27 @@ class Instance(CloudResource):
         return url
 
     def get_status(self):
-        n = get_nectar()
-        try:
-            instance_result = n.nova.servers.get(self.id)
-            return instance_result.status
-        except nova_exceptions.NotFound:
-            return MISSING
+        cloud = get_cloud_connector()
+        server = Server.create(self)
+        return cloud.get_server_status(server)
 
     def check_active_status(self):
-        return self.get_status() == ACTIVE
+        return self.get_status() == ServerStatus.ACTIVE
 
     def check_active_or_resize_statuses(self):
-        return self.get_status() in {ACTIVE, VERIFY_RESIZE, RESIZE}
+        active_resize_status = {ServerStatus.ACTIVE,
+                                ServerStatus.VERIFY_RESIZE,
+                                ServerStatus.RESIZE}
+        return self.get_status() in active_resize_status
 
     def check_resizing_status(self):
-        return self.get_status() == RESIZE
+        return self.get_status() == ServerStatus.RESIZE
 
     def check_shutdown_status(self):
-        return self.get_status() == SHUTDOWN
+        return self.get_status() == ServerStatus.SHUTDOWN
 
     def check_verify_resize_status(self):
-        return self.get_status() == VERIFY_RESIZE
+        return self.get_status() == ServerStatus.VERIFY_RESIZE
 
     def boot_volume_fields(self):
         return safe('\n'.join(

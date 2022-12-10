@@ -5,12 +5,13 @@ from django.utils.timezone import utc
 import django_rq
 import novaclient
 
+from vm_manager.cloud.connector.connector import get_cloud_connector
+from vm_manager.cloud.connector.objects import ServerStatus
+from vm_manager.cloud.environment.environment import get_cloud_environment
 from vm_manager.constants import \
-    RESIZE, VERIFY_RESIZE, ACTIVE, \
     RESIZE_CONFIRM_WAIT_SECONDS, FORCED_DOWNSIZE_WAIT_SECONDS, \
     VM_SUPERSIZED, VM_RESIZING, VM_OKAY, \
     WF_SUCCESS, WF_FAIL, WF_RETRY, WF_STARTED, WF_CONTINUE
-from vm_manager.utils.utils import after_time, get_nectar
 from vm_manager.utils.expiry import BoostExpiryPolicy
 from vm_manager.models import VMStatus, Instance, Resize, \
     EXP_EXPIRING, EXP_EXPIRY_COMPLETED, EXP_EXPIRY_FAILED, \
@@ -68,25 +69,28 @@ def extend_boost(user, vm_id, requesting_feature) -> str:
     resize.save()
     return WF_SUCCESS
 
-
+# TODO: flavor must be of type Flavor() with set id
 def _resize_vm(instance, flavor, target_status, requesting_feature):
-    n = get_nectar()
+    cloud = get_cloud_connector()
     try:
-        server = n.nova.servers.get(instance.id)
+        # TODO: instance.id is not Server()
+        server_status = cloud.get_server_status(instance.id)
+        # TODO: remove exception
     except novaclient.exceptions.NotFound:
         logger.error(f"Trying to resize {instance} but it is not "
                      "found in Nova.")
         instance.error("Nova instance is missing", gone=True)
         return WF_SUCCESS
 
-    if server.status != ACTIVE:
+    if server_status != ServerStatus.ACTIVE:
         logger.error(f"Nova instance for {instance} in unexpected state "
-                     f"{server.status}.  Needs manual cleanup.")
-        instance.error(f"Nova instance state is {server.status}")
+                     f"{server_status}.  Needs manual cleanup.")
+        instance.error(f"Nova instance state is {server_status}")
         return WF_FAIL
 
-    current_flavor = server.flavor['id']
-    if current_flavor == str(flavor):
+    # TODO: instance.id is not Flavor()
+    current_flavor = cloud.get_server_flavor(instance.id)
+    if current_flavor == flavor:
         logger.error(f"Instance {instance.id} already has flavor {flavor}. "
                      "Skipping the resize.")
         vm_status = VMStatus.objects.get_vm_status_by_instance(
@@ -95,30 +99,33 @@ def _resize_vm(instance, flavor, target_status, requesting_feature):
         vm_status.save()
         return WF_SUCCESS
 
-    resize_result = n.nova.servers.resize(instance.id, flavor)
+    # TODO: instance.id is not Flavor()
+    cloud.resize_server(instance.id, flavor)
     vm_status = VMStatus.objects.get_vm_status_by_instance(
         instance, requesting_feature)
     vm_status.status_progress = 33
     vm_status.status_message = "Resize initiated; waiting to confirm"
     vm_status.save()
+
+    cenv = get_cloud_environment()
     scheduler = django_rq.get_scheduler('default')
     scheduler.enqueue_in(timedelta(seconds=5),
                          _wait_to_confirm_resize,
                          instance, flavor, target_status,
-                         after_time(RESIZE_CONFIRM_WAIT_SECONDS),
+                         cenv.after_time(RESIZE_CONFIRM_WAIT_SECONDS),
                          requesting_feature)
     return WF_STARTED
 
 
 def _wait_to_confirm_resize(instance, flavor, target_status,
                             deadline, requesting_feature):
-    n = get_nectar()
+    cloud = get_cloud_connector()
     vm_status = VMStatus.objects.get_vm_status_by_instance(
         instance, requesting_feature)
     logger.debug(f"vm_status: {vm_status}")
 
     status = instance.get_status()
-    if status == VERIFY_RESIZE:
+    if status == ServerStatus.VERIFY_RESIZE:
         logger.info(f"Confirming resize of {instance}")
         try:
             n.nova.servers.confirm_resize(instance.id)

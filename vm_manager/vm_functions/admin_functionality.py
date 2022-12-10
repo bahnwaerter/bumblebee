@@ -1,7 +1,6 @@
 from datetime import datetime
 import logging
 from operator import itemgetter
-from uuid import UUID
 
 from django.core.mail import mail_managers
 from django.db.models import Count
@@ -15,12 +14,13 @@ import django_rq
 from guacamole.models import GuacamoleConnection
 from researcher_desktop.models import DesktopType
 from researcher_workspace.utils import offset_month_and_year
+from vm_manager.cloud.connector.connector import get_cloud_connector
+from vm_manager.cloud.environment.environment import get_cloud_environment
 from vm_manager.constants import VM_DELETED, VM_WAITING, \
     SHELVE_WAIT_SECONDS, RESIZE_WAIT_SECONDS
 from vm_manager.models import Instance, Resize, Volume, VMStatus
 from vm_manager.utils.Check_ResearchDesktop_Availability import \
     check_availability
-from vm_manager.utils.utils import after_time, get_nectar
 from vm_manager.vm_functions.delete_vm import \
     delete_vm_worker, delete_volume, archive_volume_worker
 from vm_manager.vm_functions.resize_vm import downsize_vm_worker
@@ -111,7 +111,8 @@ def admin_shelve_instance(request, instance):
         instance, None, allow_missing=True)
 
     if vm_status:
-        vm_status.wait_time = after_time(SHELVE_WAIT_SECONDS)
+        cdev = get_cloud_environment()
+        vm_status.wait_time = cdev.after_time(SHELVE_WAIT_SECONDS)
         vm_status.status = VM_WAITING
         vm_status.status_progress = 0
         vm_status.status_message = "Starting desktop shelve"
@@ -130,7 +131,8 @@ def admin_downsize_resize(request, resize):
         instance, None, allow_missing=True)
 
     if vm_status:
-        vm_status.wait_time = after_time(RESIZE_WAIT_SECONDS)
+        cenv = get_cloud_environment()
+        vm_status.wait_time = cenv.after_time(RESIZE_WAIT_SECONDS)
         vm_status.status = VM_WAITING
         vm_status.status_progress = 0
         vm_status.status_message = "Starting desktop downsize"
@@ -145,37 +147,37 @@ def admin_downsize_resize(request, resize):
 
 
 def db_check(request):
-    n = get_nectar()
-    nova_servers = n.nova.servers.list()
-    cinder_volumes = n.cinder.volumes.list()
+    cloud = get_cloud_connector()
+    servers = cloud.get_server_list()
+    volumes = cloud.get_volume_list()
 
     db_deleted_instances = Instance.objects.exclude(deleted=None) \
                                            .values_list('id', flat=True)
     deleted_instances = [
         (server.id, server.name, server.metadata.get('environment', ''))
-        for server in nova_servers
-            if UUID(server.id) in db_deleted_instances]
+        for server in servers
+            if server.id in db_deleted_instances]
 
     db_deleted_volumes = Volume.objects.exclude(deleted=None) \
                                        .values_list('id', flat=True)
     deleted_volumes = [
         (volume.id, volume.name, volume.metadata.get('environment',
                                                      volume.name[-1]))
-        for volume in cinder_volumes
-            if UUID(volume.id) in db_deleted_volumes]
+        for volume in volumes
+            if volume.id in db_deleted_volumes]
 
     db_instances = Instance.objects.filter(deleted=None) \
                                    .values_list('id', flat=True)
     missing_instances = [
         (server.id, server.name, server.metadata.get('environment', ''))
-        for server in nova_servers if UUID(server.id) not in db_instances]
+        for server in servers if server.id not in db_instances]
 
     db_volumes = Volume.objects.filter(deleted=None) \
                                .values_list('id', flat=True)
     missing_volumes = [
         (volume.id, volume.name, volume.metadata.get('environment',
                                                      volume.name[-1]))
-        for volume in cinder_volumes if UUID(volume.id) not in db_volumes]
+        for volume in volumes if volume.id not in db_volumes]
 
     live_connections = set(
         Instance.objects.filter(deleted=None, marked_for_deletion=None)

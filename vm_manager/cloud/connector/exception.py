@@ -1,0 +1,2 @@
+class CloudConnectorError(Exception):
+    pass

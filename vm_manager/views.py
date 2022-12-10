@@ -13,10 +13,10 @@ from django.utils.html import format_html
 from django.utils.timezone import utc
 from django.views.decorators.csrf import csrf_exempt
 import django_rq
-import novaclient
 
 from researcher_desktop.models import AvailabilityZone
 from researcher_desktop.utils.utils import get_desktop_type
+from vm_manager.cloud.environment.environment import get_cloud_environment
 
 from vm_manager.constants import VM_ERROR, VM_OKAY, VM_WAITING, \
     VM_SHELVED, NO_VM, VM_SHUTDOWN, VM_SUPERSIZED, VM_DELETED, \
@@ -29,7 +29,6 @@ from vm_manager.constants import VM_ERROR, VM_OKAY, VM_WAITING, \
 from vm_manager.models import VMStatus, Instance, Resize, Volume, EXP_EXPIRING
 from vm_manager.utils.expiry import BoostExpiryPolicy, InstanceExpiryPolicy, \
     VolumeExpiryPolicy
-from vm_manager.utils.utils import after_time, generate_hostname, get_nectar
 
 # These are needed, as they're consumed by researcher_workspace/views.py
 from vm_manager.vm_functions.admin_functionality import \
@@ -76,10 +75,11 @@ def launch_vm(user, desktop_type, zone) -> str:
         logger.error(message)
         return message
 
+    cenv = get_cloud_environment()
     vm_status = VMStatus(
         user=user, requesting_feature=desktop_type.feature,
         operating_system=desktop_type.id, status=VM_CREATING,
-        wait_time=after_time(LAUNCH_WAIT_SECONDS),
+        wait_time=cenv.after_time(LAUNCH_WAIT_SECONDS),
         status_progress=0, status_message="Starting desktop creation",
         status_done="has been created"
     )
@@ -147,7 +147,8 @@ def shelve_vm(user, vm_id, requesting_feature) -> str:
     logger.info(f"Changing the VMStatus of {vm_id} "
                 f"from {vm_status.status} to {VM_WAITING} "
                 f"and Mark for Deletion is set on the Instance")
-    vm_status.wait_time = after_time(SHELVE_WAIT_SECONDS)
+    cenv = get_cloud_environment()
+    vm_status.wait_time = cenv.after_time(SHELVE_WAIT_SECONDS)
     vm_status.status = VM_WAITING
     vm_status.status_progress = 0
     vm_status.status_message = "Starting desktop shelve"
@@ -169,11 +170,12 @@ def unshelve_vm(user, desktop_type) -> str:
     zone = AvailabilityZone.objects.get(
         name=vm_status.instance.boot_volume.zone)
 
+    cenv = get_cloud_environment()
     vm_status = VMStatus(user=user,
                          requesting_feature=desktop_type.feature,
                          operating_system=desktop_type.id,
                          status=VM_CREATING,
-                         wait_time=after_time(LAUNCH_WAIT_SECONDS),
+                         wait_time=cenv.after_time(LAUNCH_WAIT_SECONDS),
                          status_progress=0,
                          status_message="Starting desktop unshelve",
                          status_done="has been unshelved")
@@ -221,9 +223,10 @@ def reboot_vm(user, vm_id, reboot_level, requesting_feature) -> str:
         return _wrong_state_message(
             "reboot", user, feature=requesting_feature, vm_status=vm_status,
             vm_id=vm_id)
+    cenv = get_cloud_environment()
     target_status = vm_status.status
     vm_status.status = VM_WAITING
-    vm_status.wait_time = after_time(REBOOT_WAIT_SECONDS)
+    vm_status.wait_time = cenv.after_time(REBOOT_WAIT_SECONDS)
     vm_status.status_progress = 0
     vm_status.status_message = "Starting desktop reboot"
     vm_status.status_done = "has been rebooted"
@@ -250,8 +253,9 @@ def supersize_vm(user, vm_id, requesting_feature) -> str:
 
     desktop_type = get_desktop_type(vm_status.operating_system)
 
+    cenv = get_cloud_environment()
     vm_status.status = VM_RESIZING
-    vm_status.wait_time = after_time(RESIZE_WAIT_SECONDS)
+    vm_status.wait_time = cenv.after_time(RESIZE_WAIT_SECONDS)
     vm_status.status_progress = 0
     vm_status.status_message = "Starting desktop boost"
     vm_status.status_done = "has been boosted"
@@ -278,8 +282,9 @@ def downsize_vm(user, vm_id, requesting_feature) -> str:
 
     desktop_type = get_desktop_type(vm_status.operating_system)
 
+    cenv = get_cloud_environment()
     vm_status.status = VM_RESIZING
-    vm_status.wait_time = after_time(RESIZE_WAIT_SECONDS)
+    vm_status.wait_time = cenv.after_time(RESIZE_WAIT_SECONDS)
     vm_status.status_progress = 0
     vm_status.status_message = "Starting desktop downsize"
     vm_status.status_done = "has been downsized"
@@ -496,8 +501,9 @@ def notify_vm(request, requesting_feature):
                      f"IP address {ip_address}")
         raise Http404
     volume = instance.boot_volume
-    if generate_hostname(volume.hostname_id,
-                         volume.operating_system) != hostname:
+    cenv = get_cloud_environment()
+    if cenv.generate_hostname(volume.hostname_id,
+                              volume.operating_system) != hostname:
         logger.error(f"Hostname provided in request does not match "
                      f"hostname of volume {instance}, {hostname}")
         raise Http404

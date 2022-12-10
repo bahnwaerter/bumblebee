@@ -1,15 +1,16 @@
 from datetime import datetime, timedelta
 import logging
 
-import cinderclient
 import django_rq
-import novaclient
 
 from django.conf import settings
 from django.utils.timezone import utc
 
-from vm_manager.constants import ACTIVE, SHUTDOWN, NO_VM, VM_SHELVED, \
-    VOLUME_AVAILABLE, BACKUP_CREATING, BACKUP_AVAILABLE, VM_WAITING, \
+from vm_manager.cloud.connector.connector import get_cloud_connector
+from vm_manager.cloud.connector.exception import CloudConnectorError
+from vm_manager.cloud.connector.objects import Server, ServerStatus, Volume, VolumeStatus, VolumeBackup
+from vm_manager.cloud.environment.environment import get_cloud_environment
+from vm_manager.constants import NO_VM, VM_SHELVED, VM_WAITING, \
     INSTANCE_DELETION_RETRY_WAIT_TIME, INSTANCE_DELETION_RETRY_COUNT, \
     VOLUME_DELETION_RETRY_WAIT_TIME, VOLUME_DELETION_RETRY_COUNT, \
     BACKUP_DELETION_RETRY_WAIT_TIME, BACKUP_DELETION_RETRY_COUNT, \
@@ -20,7 +21,6 @@ from vm_manager.constants import ACTIVE, SHUTDOWN, NO_VM, VM_SHELVED, \
 from vm_manager.models import VMStatus, Expiration, \
     EXP_EXPIRING, EXP_EXPIRY_COMPLETED, \
     EXP_EXPIRY_FAILED, EXP_EXPIRY_FAILED_RETRYABLE
-from vm_manager.utils.utils import get_nectar, after_time
 
 from guacamole.models import GuacamoleConnection
 
@@ -40,27 +40,28 @@ def delete_vm_worker(instance, archive=False):
         instance.guac_connection = None
         instance.save()
 
-    n = get_nectar()
-    try:
-        status = n.nova.servers.get(instance.id).status
-        if status == ACTIVE:
-            n.nova.servers.stop(instance.id)
-        elif status == SHUTDOWN:
-            logger.info(f"{instance} already shutdown in Nova.")
-        else:
-            # Possible states include stuck while resizing, paused / locked
-            # due to security incident, ERROR cause by stuck launching (?)
-            logger.error(f"Nova instance for {instance} is in unexpected "
-                         f"state {status}.  Needs manual cleanup.")
-            instance.error(f"Nova instance state is {status}")
-            return WF_RETRY
-
-    except novaclient.exceptions.NotFound:
+    cloud = get_cloud_connector()
+    server = Server.create(instance)
+    server_exist = cloud.is_server_created(server)
+    if server_exist is None or server_exist is False:
         logger.error(f"Trying to delete {instance} but it is not "
                      f"found in Nova.")
         # It no longer matters, but record the fact that the Nova instance
         # went missing anyway.
         instance.error(f"Nova instance is missing", gone=True)
+    else:
+        status = cloud.get_server_status(server)
+        if status == ServerStatus.ACTIVE:
+            cloud.stop_server(server)
+        elif status == ServerStatus.SHUTOFF:
+            logger.info(f"{instance} already shutdown in Nova.")
+        else:
+            # Possible states include stuck while resizing, paused / locked
+            # due to security incident, ERROR cause by stuck launching (?)
+            logger.error(f"Cloud instance for {instance} is in unexpected "
+                         f"state {status}. Needs manual cleanup.")
+            instance.error(f"Nova instance state is {status}")
+            return WF_RETRY
 
     # Next step is to check if the Instance is Shutoff in Nova before
     # telling Nova to delete it
@@ -113,27 +114,29 @@ def _check_instance_is_shutoff_and_delete(
 
 
 def delete_instance(instance):
-    n = get_nectar()
-    try:
-        n.nova.servers.delete(instance.id)
-        logger.info(f"Instructed Nova to delete {instance}")
-    except novaclient.exceptions.NotFound:
-        logger.info(f"{instance} already deleted")
-    except novaclient.exceptions.ClientException:
-        logger.exception(f"Instance deletion call for {instance} failed")
+    cloud = get_cloud_connector()
+    server = Server(id=instance.id)
+    deleted = cloud.delete_server(server)
+    logger.info(f"Instructed cloud to delete {instance}")
+    if deleted is None or deleted is False:
         return False
-    instance.marked_for_deletion = datetime.now(utc)
-    instance.save()
-    return True
+    else:
+        instance.marked_for_deletion = datetime.now(utc)
+        instance.save()
+        return True
 
 
 def _dispose_volume_once_instance_is_deleted(instance, archive, retries):
-    n = get_nectar()
-    try:
-        os_instance = n.nova.servers.get(instance.id)
+    cloud = get_cloud_connector()
+    server = Server(id=instance.id)
+    server_exist = cloud.is_server_created(server)
+    if server_exist is None:
+        logger.exception(f"Instance get call for {instance} failed")
+        return WF_RETRY
+    elif server_exist:
         logger.debug(f"Instance delete status is retries: {retries} "
-                     f"Nova instance: {os_instance}")
-    except novaclient.exceptions.NotFound:
+                     f"Cloud instance: {server.id}")
+    else:
         instance.deleted = datetime.now(utc)
         instance.save()
         volume = instance.boot_volume
@@ -154,9 +157,6 @@ def _dispose_volume_once_instance_is_deleted(instance, archive, retries):
                 return WF_CONTINUE
             else:
                 return _end_delete(volume, WF_RETRY)
-    except novaclient.exceptions.ClientException:
-        logger.exception(f"Instance get call for {instance} failed")
-        return WF_RETRY
 
     # Nova still has the instance
     if retries > 0:
@@ -184,36 +184,35 @@ def delete_volume_worker(volume):
 
 
 def delete_volume(volume):
-    n = get_nectar()
-    try:
-        n.cinder.volumes.delete(volume.id)
-    except cinderclient.exceptions.NotFound:
-        logger.info(f"Cinder volume missing for {volume}.  Can't delete it.")
-    except cinderclient.exceptions.ClientException:
-        logger.exception(f"Cinder volume delete failed for {volume}")
+    cloud = get_cloud_connector()
+    cloud_volume = Volume(volume.id)
+    deleted = cloud.delete_volume(cloud_volume)
+    logger.info(f"Instructed cloud to delete {volume}")
+    if deleted is None or deleted is False:
         return False
-
-    volume.deleted = datetime.now(utc)
-    volume.save()
-    return True
+    else:
+        volume.deleted = datetime.now(utc)
+        volume.save()
+        return True
 
 
 def _wait_until_volume_is_deleted(volume, retries):
-    n = get_nectar()
-    try:
-        os_volume = n.cinder.volumes.get(volume.id)
-    except cinderclient.exceptions.NotFound:
+    cloud = get_cloud_connector()
+    cloud_volume = Volume(id=volume.id)
+    volume_exist = cloud.is_volume_created(cloud_volume)
+    if volume_exist is None:
+        logger.exception(f"Volume get call for {volume} failed")
+        return _end_delete(volume, WF_RETRY)
+    elif volume_exist is False:
         logger.info(f"Cinder volume deletion completed for {volume}")
         volume.deleted = datetime.now(utc)
         volume.save()
         return _end_delete(volume, WF_SUCCESS)
-    except cinderclient.exceptions.ClientException:
-        logger.exception(f"Volume get call for {volume} failed")
-        return _end_delete(volume, WF_RETRY)
 
-    if os_volume.status != "deleting":
-        logger.error(f"Cinder volume delete failed for {volume}: "
-                     f"status is {os_volume.status}")
+    volume_status = cloud.get_volume_status(volume)
+    if volume_status != VolumeStatus.DELETING:
+        logger.error(f"Cloud volume delete failed for {volume}: "
+                     f"status is {volume_status}")
         return _end_delete(volume, WF_RETRY)
 
     if retries > 0:
@@ -233,21 +232,20 @@ def delete_backup_worker(volume):
     if not volume.backup_id:
         logger.info(f"No backup to delete for {volume}")
         return WF_SUCCESS
-    n = get_nectar()
-    try:
-        n.cinder.backups.delete(volume.backup_id)
-        logger.info(f"Cinder backup delete requested for {volume}, "
-                    f"backup {volume.backup_id}")
-    except cinderclient.exceptions.NotFound:
+    cloud = get_cloud_connector()
+    deleted = cloud.delete_volume_backup(volume.backup_id)
+    logger.info(f"Cloud backup delete requested for {volume}, "
+                f"backup {volume.backup_id}")
+    if deleted is None:
+        logger.exception(f"Cinder backup delete failed for {volume}, "
+                         f"backup {volume.backup_id}")
+        return WF_RETRY
+    elif deleted:
         logger.info(f"Cinder backup already deleted for {volume}, "
                     f"backup {volume.backup_id}")
         volume.backup_id = None
         volume.save()
         return WF_SUCCESS
-    except cinderclient.exceptions.ClientException:
-        logger.exception(f"Cinder backup delete failed for {volume}, "
-                         f"backup {volume.backup_id}")
-        return WF_RETRY
 
     scheduler = django_rq.get_scheduler('default')
     scheduler.enqueue_in(
@@ -258,19 +256,19 @@ def delete_backup_worker(volume):
 
 
 def _wait_until_backup_is_deleted(volume, retries):
-    n = get_nectar()
-    try:
-        backup = n.cinder.backups.get(volume.backup_id)
-    except cinderclient.exceptions.NotFound:
+    cloud = get_cloud_connector()
+    cloud_volume_backup = VolumeBackup(id=volume.backup_id)
+    backup_exist = cloud.is_backup_created(cloud_volume_backup)
+    if backup_exist is None:
+        logger.exception(f"Cinder backup get failed for {volume}, "
+                         f"backup {volume.backup_id}")
+        return _end_delete(volume, WF_RETRY)
+    elif backup_exist is False:
         logger.info(f"Cinder backup for {volume} has been deleted, "
                     f"backup {volume.backup_id}")
         volume.backup_id = None
         volume.save()
         return _end_delete(volume, WF_SUCCESS)
-    except cinderclient.exceptions.ClientException:
-        logger.exception(f"Cinder backup get failed for {volume}, "
-                         f"backup {volume.backup_id}")
-        return _end_delete(volume, WF_RETRY)
 
     if retries > 0:
         scheduler = django_rq.get_scheduler('default')
@@ -312,35 +310,35 @@ def archive_volume_worker(volume, requesting_feature):
     volume.marked_for_deletion = datetime.now(utc)
     volume.save()
 
-    n = get_nectar()
-    try:
-        cinder_volume = n.cinder.volumes.get(volume_id=volume.id)
-        if cinder_volume.status != VOLUME_AVAILABLE:
-            logger.error(
-                f"Cannot archive volume with Cinder status "
-                f"{cinder_volume.status}: {volume}. Manual cleanup needed.")
-            return _end_delete(volume, WF_RETRY)
-    except cinderclient.exceptions.NotFound:
-        volume.error("Cinder volume missing.  Cannot be archived.")
-        logger.error(
-            f"Cinder volume missing for {volume}. Cannot be archived.")
+    cloud = get_cloud_connector()
+    cloud_volume = Volume(id=volume.id)
+    volume_exist = cloud.is_volume_created(cloud_volume)
+    if volume_exist is None or volume_exist is False:
+        volume.error("Cloud volume missing. Cannot be archived.")
+        logger.error(f"Cloud volume missing for {volume}. "
+                     f"Cannot be archived.")
         return _end_delete(volume, WF_SUCCESS)
+    else:
+        volume_status = cloud.get_volume_status(cloud_volume)
+        if volume_status != VolumeStatus.AVAILABLE:
+            logger.error(
+                f"Cannot archive volume with cloud volume status "
+                f"{volume_status}: {volume}. Manual cleanup needed.")
+            return _end_delete(volume, WF_RETRY)
 
     try:
-        backup = n.cinder.backups.create(
-            volume.id, name=f"{volume.id}-archive")
-        logger.info(
-            f'Cinder backup {backup.id} started for volume {volume.id}')
-    except cinderclient.exceptions.ClientException as e:
+        cloud_volume_backup = cloud.create_volume_backup(volume=cloud_volume, name=f"{volume.id}-archive")
+        logger.info(f'Cinder backup {cloud_volume_backup.id} started for volume {volume.id}')
+    except CloudConnectorError:
         volume.error("Cinder backup failed")
-        logger.error(
-            f"Cinder backup failed for volume {volume.id}: {e}")
+        logger.error(f"Cinder backup failed for volume {volume.id}")
         return _end_delete(volume, WF_RETRY)
 
+    cenv = get_cloud_environment()
     scheduler = django_rq.get_scheduler('default')
     scheduler.enqueue_in(timedelta(seconds=5), wait_for_backup,
-                         volume, backup.id,
-                         after_time(ARCHIVE_WAIT_SECONDS))
+                         volume, cloud_volume_backup.id,
+                         cenv.after_time(ARCHIVE_WAIT_SECONDS))
 
     # This allows the user to launch a new desktop immediately.
     vm_status = VMStatus.objects.get_vm_status_by_volume(
@@ -353,16 +351,18 @@ def archive_volume_worker(volume, requesting_feature):
 
 
 def wait_for_backup(volume, backup_id, deadline):
-    n = get_nectar()
-    try:
-        details = n.cinder.backups.get(backup_id)
-    except cinderclient.exceptions.NotFound:
+    cloud = get_cloud_connector()
+    cloud_backup = VolumeBackup(id=backup_id)
+    backup_exist = cloud.is_backup_created(cloud_backup)
+    if backup_exist is None or backup_exist is False:
         # The backup has disappeared ...
         logger.error(f"Backup {backup_id} for volume {volume} not "
-                     "found.  Presumed failed.")
+                     "found. Presumed failed.")
         return _end_delete(volume, WF_RETRY)
 
-    if details.status == BACKUP_CREATING:
+    backup_status = cloud.get_backup_status(cloud_backup)
+
+    if backup_status == VolumeStatus.BACKING_UP:
         if datetime.now(utc) > deadline:
             logger.error(f"Backup took too long: backup {backup_id}, "
                          f"volume {volume}")
@@ -371,7 +371,7 @@ def wait_for_backup(volume, backup_id, deadline):
         scheduler.enqueue_in(timedelta(seconds=ARCHIVE_POLL_SECONDS),
                              wait_for_backup, volume, backup_id, deadline)
         return WF_CONTINUE
-    elif details.status == BACKUP_AVAILABLE:
+    elif backup_status == VolumeStatus.AVAILABLE:
         logger.info(f"Backup {backup_id} completed for volume {volume}")
         volume.backup_id = backup_id
         volume.archived_at = datetime.now(utc)
@@ -383,7 +383,7 @@ def wait_for_backup(volume, backup_id, deadline):
         return _end_delete(volume, WF_SUCCESS)
     else:
         logger.error(f"Backup {backup_id} for volume {volume} is in "
-                     f"unexpected state {details.status}")
+                     f"unexpected state {backup_status}")
         return _end_delete(volume, WF_FAIL)
 
 

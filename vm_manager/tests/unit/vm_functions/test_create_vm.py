@@ -9,9 +9,10 @@ from django.http import Http404
 from django.utils.timezone import utc
 
 from researcher_desktop.tests.factories import AvailabilityZoneFactory
+from vm_manager.cloud.connector.connector import get_cloud_connector
 
 from vm_manager.tests.common import UUID_1
-from vm_manager.tests.fakes import FakeServer, FakeVolume, FakeNectar
+from vm_manager.tests.fakes import FakeServer, FakeVolume, FakeCloudConnector
 from vm_manager.tests.factories import VMStatusFactory
 from vm_manager.tests.unit.vm_functions.base import VMFunctionTestBase
 
@@ -21,7 +22,6 @@ from vm_manager.models import VMStatus, Volume, Instance
 from vm_manager.vm_functions.create_vm import launch_vm_worker, \
     wait_to_create_instance, _create_volume, _create_instance, \
     wait_for_instance_active, _get_source_volume_id, extend_instance
-from vm_manager.utils.utils import get_nectar
 
 
 class CreateVMTests(VMFunctionTestBase):
@@ -97,14 +97,14 @@ class CreateVMTests(VMFunctionTestBase):
     @patch('vm_manager.vm_functions.create_vm._create_instance')
     @patch('vm_manager.vm_functions.create_vm.django_rq')
     @patch('vm_manager.vm_functions.create_vm.datetime')
-    @patch('vm_manager.vm_functions.create_vm.get_nectar')
+    @patch('vm_manager.vm_functions.create_vm.get_cloud_connector')
     def test_wait_to_create(self, mock_get, mock_datetime,
                             mock_rq, mock_create_instance):
         now = datetime.now(utc)
         mock_datetime.now.return_value = now
         mock_scheduler = Mock()
         mock_rq.get_scheduler.return_value = mock_scheduler
-        fake = FakeNectar()
+        fake = FakeCloudConnector()
         fake_volume, fake_instance, fake_status = \
             self.build_fake_vol_inst_status()
         fake.cinder.volumes.get.return_value = FakeVolume(
@@ -132,14 +132,14 @@ class CreateVMTests(VMFunctionTestBase):
     @patch('vm_manager.vm_functions.create_vm._create_instance')
     @patch('vm_manager.vm_functions.create_vm.django_rq')
     @patch('vm_manager.vm_functions.create_vm.datetime')
-    @patch('vm_manager.vm_functions.create_vm.get_nectar')
+    @patch('vm_manager.vm_functions.create_vm.get_cloud_connector')
     def test_wait_to_create_unshelve(self, mock_get, mock_datetime, mock_rq,
                                      mock_create_instance):
         now = datetime.now(utc)
         mock_datetime.now.return_value = now
         mock_scheduler = Mock()
         mock_rq.get_scheduler.return_value = mock_scheduler
-        fake = FakeNectar()
+        fake = FakeCloudConnector()
         fake_volume, fake_instance, fake_status = \
             self.build_fake_vol_inst_status(status=VM_SHELVED)
         fake_volume.shelved_at = now
@@ -167,10 +167,10 @@ class CreateVMTests(VMFunctionTestBase):
 
     @patch('vm_manager.vm_functions.create_vm.django_rq')
     @patch('vm_manager.vm_functions.create_vm._create_instance')
-    @patch('vm_manager.vm_functions.create_vm.get_nectar')
+    @patch('vm_manager.vm_functions.create_vm.get_cloud_connector')
     def test_wait_to_create_timeout(self, mock_get, mock_create_instance,
                                     mock_rq):
-        fake = FakeNectar()
+        fake = FakeCloudConnector()
         fake_volume, _, fake_status = self.build_fake_vol_inst_status()
         fake.cinder.volumes.get.return_value = FakeVolume(
             volume_id=fake_volume.id,
@@ -198,12 +198,12 @@ class CreateVMTests(VMFunctionTestBase):
 
     @patch('vm_manager.vm_functions.create_vm.django_rq')
     @patch('vm_manager.vm_functions.create_vm._create_instance')
-    @patch('vm_manager.vm_functions.create_vm.get_nectar')
+    @patch('vm_manager.vm_functions.create_vm.get_cloud_connector')
     def test_wait_to_create_poll(self, mock_get, mock_create_instance,
                                  mock_rq):
         mock_scheduler = Mock()
         mock_rq.get_scheduler.return_value = mock_scheduler
-        fake = FakeNectar()
+        fake = FakeCloudConnector()
         fake_volume, _, fake_status = self.build_fake_vol_inst_status()
         fake.cinder.volumes.get.return_value = FakeVolume(
             volume_id=fake_volume.id,
@@ -223,17 +223,17 @@ class CreateVMTests(VMFunctionTestBase):
 
     @patch('vm_manager.vm_functions.create_vm.generate_server_name')
     @patch('vm_manager.vm_functions.create_vm._get_source_volume_id')
-    @patch('vm_manager.vm_functions.create_vm.get_nectar')
-    def test_create_volume(self, mock_get_nectar, mock_get_id, mock_gen):
+    @patch('vm_manager.vm_functions.create_vm.get_cloud_connector')
+    def test_create_volume(self, mock_get_cloud_connector, mock_get_id, mock_gen):
         mock_gen.return_value = "abcdef"
         mock_get_id.return_value = self.UBUNTU_source_volume_id
         fake_vm_status = VMStatusFactory.create(
             requesting_feature=self.FEATURE,
             operating_system=self.UBUNTU.id,
             user=self.user, status=NO_VM)
-        fake = FakeNectar()
+        fake = FakeCloudConnector()
         fake.cinder.volumes.create.return_value = FakeVolume(id=UUID_1)
-        mock_get_nectar.return_value = fake
+        mock_get_cloud_connector.return_value = fake
 
         result = _create_volume(self.user, self.UBUNTU, self.zone)
 
@@ -261,12 +261,12 @@ class CreateVMTests(VMFunctionTestBase):
         self.assertEqual(NO_VM, vm_status.status)
         self.assertEqual(25, vm_status.status_progress)
 
-    @patch('vm_manager.vm_functions.create_vm.get_nectar')
+    @patch('vm_manager.vm_functions.create_vm.get_cloud_connector')
     @patch('vm_manager.vm_functions.create_vm.logger')
     def test_create_volume_exists(self, mock_logger, mock_get):
         fake_volume, _, _ = self.build_fake_vol_inst_status()
 
-        fake = FakeNectar()
+        fake = FakeCloudConnector()
         fake.cinder.volumes.get.return_value = FakeVolume(
             id=fake_volume.id, availability_zone=self.zone.name,
             status=VOLUME_AVAILABLE)
@@ -280,11 +280,11 @@ class CreateVMTests(VMFunctionTestBase):
             "_create_volume.  Needs manual cleanup.")
         fake.cinder.volumes.get.assert_called_once_with(fake_volume.id)
 
-    @patch('vm_manager.vm_functions.create_vm.get_nectar')
+    @patch('vm_manager.vm_functions.create_vm.get_cloud_connector')
     def test_create_volume_shelved(self, mock_get):
         fake_volume, _, _ = self.build_fake_vol_inst_status(status=VM_SHELVED)
 
-        fake = FakeNectar()
+        fake = FakeCloudConnector()
         fake.cinder.volumes.get.return_value = FakeVolume(
             id=fake_volume.id, availability_zone=self.zone.name,
             status=VOLUME_AVAILABLE)
@@ -294,12 +294,12 @@ class CreateVMTests(VMFunctionTestBase):
                          _create_volume(self.user, self.UBUNTU, self.zone))
         fake.cinder.volumes.get.assert_called_once_with(fake_volume.id)
 
-    @patch('vm_manager.vm_functions.create_vm.get_nectar')
+    @patch('vm_manager.vm_functions.create_vm.get_cloud_connector')
     @patch('vm_manager.vm_functions.create_vm.logger')
     def test_create_volume_archived(self, mock_logger, mock_get):
         fake_volume, _, _ = self.build_fake_vol_inst_status(status=VM_SHELVED)
 
-        fake = FakeNectar()
+        fake = FakeCloudConnector()
         fake.cinder.volumes.get.return_value = FakeVolume(
             id=fake_volume.id, availability_zone=self.zone.name,
             status=VOLUME_AVAILABLE)
@@ -313,11 +313,11 @@ class CreateVMTests(VMFunctionTestBase):
         mock_logger.error.assert_called_once_with(
             f"Cannot launch shelved volume marked as archived: {fake_volume}")
 
-    @patch('vm_manager.vm_functions.create_vm.get_nectar')
+    @patch('vm_manager.vm_functions.create_vm.get_cloud_connector')
     def test_create_volume_missing(self, mock_get):
         fake_volume, _, _ = self.build_fake_vol_inst_status()
 
-        fake = FakeNectar()
+        fake = FakeCloudConnector()
         fake.cinder.volumes.get.side_effect = \
             cinderclient.exceptions.NotFound(code=42)
         mock_get.return_value = fake
@@ -326,11 +326,11 @@ class CreateVMTests(VMFunctionTestBase):
         self.assertEqual(None, result)
         fake.cinder.volumes.get.assert_called_once_with(fake_volume.id)
 
-    @patch('vm_manager.vm_functions.create_vm.get_nectar')
+    @patch('vm_manager.vm_functions.create_vm.get_cloud_connector')
     @patch('vm_manager.vm_functions.create_vm.logger')
     def test_create_volume_wrong_zone(self, mock_logger, mock_get):
         fake_volume, _, _ = self.build_fake_vol_inst_status()
-        fake = FakeNectar()
+        fake = FakeCloudConnector()
         fake.cinder.volumes.get.return_value = FakeVolume(
             id=fake_volume.id, availability_zone=self.zone.name,
             status=VOLUME_AVAILABLE)
@@ -347,12 +347,12 @@ class CreateVMTests(VMFunctionTestBase):
             "Needs manual cleanup")
         fake.cinder.volumes.get.assert_called_once_with(fake_volume.id)
 
-    @patch('vm_manager.vm_functions.create_vm.get_nectar')
+    @patch('vm_manager.vm_functions.create_vm.get_cloud_connector')
     def test_create_volume_deleted(self, mock_get):
         fake_volume, _, _ = self.build_fake_vol_inst_status(status=NO_VM)
         new_vol_id = str(uuid.uuid4())
 
-        fake = FakeNectar()
+        fake = FakeCloudConnector()
         fake.cinder.volumes.list.return_value = [
             FakeVolume(name=f"{self.UBUNTU.image_name} [42]",
                        metadata={'nectar_build': '42'},
@@ -368,10 +368,10 @@ class CreateVMTests(VMFunctionTestBase):
         self.assertIsNone(volume.error_message)
         fake.cinder.volumes.create.assert_not_called()
 
-    @patch('vm_manager.vm_functions.create_vm.get_nectar')
+    @patch('vm_manager.vm_functions.create_vm.get_cloud_connector')
     def test_get_source_volume_id(self, mock_get):
         id = str(uuid.uuid4())
-        fake = get_nectar()
+        fake = get_cloud_connector()
         fake.cinder.volumes.list.reset_mock()
         fake.cinder.volumes.list.return_value = [
             FakeVolume(name=f"{self.UBUNTU.image_name} [42]",
@@ -408,14 +408,14 @@ class CreateVMTests(VMFunctionTestBase):
     @patch('vm_manager.vm_functions.create_vm.generate_server_name')
     @patch('vm_manager.vm_functions.create_vm.generate_password')
     @patch('vm_manager.vm_functions.create_vm.render_to_string')
-    @patch('vm_manager.vm_functions.create_vm.get_nectar')
+    @patch('vm_manager.vm_functions.create_vm.get_cloud_connector')
     def test_create_instance(self, mock_get, mock_render, mock_gen_password,
                              mock_gen_server_name, mock_gen_hostname):
         mock_gen_hostname.return_value = "mullion"
         mock_gen_server_name.return_value = "foobar"
         mock_gen_password.return_value = "secret"
         mock_render.return_value = "RENDERED_USER_DATA"
-        fake = FakeNectar()
+        fake = FakeCloudConnector()
         fake_volume = self.build_fake_volume()
         mock_get.return_value = fake
 
@@ -456,10 +456,10 @@ class CreateVMTests(VMFunctionTestBase):
         )
 
     @patch('vm_manager.vm_functions.create_vm.django_rq')
-    @patch('vm_manager.vm_functions.create_vm.get_nectar')
-    @patch('vm_manager.models.get_nectar')
+    @patch('vm_manager.vm_functions.create_vm.get_cloud_connector')
+    @patch('vm_manager.models.get_cloud_connector')
     def test_wait_for_active_timeout(self, mock_get, mock_get_2, mock_rq):
-        fake = FakeNectar()
+        fake = FakeCloudConnector()
         _, fake_instance, fake_status = self.build_fake_vol_inst_status()
         fake.nova.servers.get.return_value = FakeServer(
             id=fake_instance.id, status='BOOTING')
@@ -481,12 +481,12 @@ class CreateVMTests(VMFunctionTestBase):
         mock_rq.get_scheduler.assert_not_called()
 
     @patch('vm_manager.vm_functions.create_vm.django_rq')
-    @patch('vm_manager.vm_functions.create_vm.get_nectar')
-    @patch('vm_manager.models.get_nectar')
+    @patch('vm_manager.vm_functions.create_vm.get_cloud_connector')
+    @patch('vm_manager.models.get_cloud_connector')
     def test_wait_for_active_poll(self, mock_get, mock_get_2, mock_rq):
         mock_scheduler = Mock()
         mock_rq.get_scheduler.return_value = mock_scheduler
-        fake = FakeNectar()
+        fake = FakeCloudConnector()
         _, fake_instance, fake_status = self.build_fake_vol_inst_status()
         fake.nova.servers.get.return_value = FakeServer(
             id=fake_instance.id, status='BOOTING')
@@ -503,12 +503,12 @@ class CreateVMTests(VMFunctionTestBase):
             self.user, self.UBUNTU, fake_instance, start)
 
     @patch('vm_manager.vm_functions.create_vm.django_rq')
-    @patch('vm_manager.models.get_nectar')
-    @patch('vm_manager.vm_functions.create_vm.get_nectar')
+    @patch('vm_manager.models.get_cloud_connector')
+    @patch('vm_manager.vm_functions.create_vm.get_cloud_connector')
     def test_wait_for_active_success(self, mock_get, mock_get_2, mock_rq):
         mock_scheduler = Mock()
         mock_rq.get_scheduler.return_value = mock_scheduler
-        fake = FakeNectar()
+        fake = FakeCloudConnector()
         _, fake_instance, fake_status = self.build_fake_vol_inst_status(
             status=VM_WAITING)
         fake.nova.servers.get.return_value = FakeServer(
