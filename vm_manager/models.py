@@ -3,6 +3,7 @@ import logging
 import nanoid
 import string
 
+import novaclient.v2.servers
 from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.db import models
@@ -317,6 +318,8 @@ class InstanceManager(models.Manager):
 class Instance(CloudResource):
     boot_volume = models.ForeignKey(Volume, on_delete=models.PROTECT, )
     ip_address = models.GenericIPAddressField(null=True, blank=True)
+    console_addr = models.GenericIPAddressField(null=True, blank=True)
+    console_port = models.PositiveIntegerField(null=True, blank=True)
     guac_connection = models.ForeignKey(GuacamoleConnection,
         on_delete=models.SET_NULL, null=True, blank=True)
     username = models.CharField(max_length=20)
@@ -335,9 +338,44 @@ class Instance(CloudResource):
                 self.save()
             return self.ip_address
 
+    def get_console_addr(self):
+        if self.console_address:
+            return self.console_address
+        else:
+            n = get_nectar()
+            nova_server = n.nova.servers.get(self.id)
+            for key in nova_server.addresses:
+                self.console_address = nova_server.addresses[key][0]['addr']
+                self.save()
+            return self.console_address
+
+            vnc_console = n.nova.servers.get_vnc_console(self.id, 'novnc')
+            token = parse_token(vnc_console.url)
+            info = n.nova.servers.get_console_token_info(token)
+            console_host = info.host
+            console_port = info.port
+        class UpdatedServerMgr(ServerManager):
+            def get_console_token_info(self, console_token):
+                url = '/os-console-auth-tokens/%s' % console_token
+                resp, body = self.api.client.get(url)
+                return self.convert_into_with_meta(body, resp)
+
+        novaclient.client.Client('2')
+          novaclient.v2.client.Client()
+            self.servers = novaclient.v2.servers.ServerManager(self)
+
+
+    def get_console_port(self):
+        if self.console_port:
+            return self.console_port
+        else:
+            n = get_nectar()
+            nova_server = n.nova.servers
+
     def create_guac_connection(self):
         params = [
-            ('hostname', self.get_ip_addr()),
+            ('hostname', self.get_console_addr()),
+            ('port', self.get_console_port()),
             ('username', self.username),
             ('password', self.password),
             ('security', 'tls'),
