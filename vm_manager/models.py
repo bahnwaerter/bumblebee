@@ -317,6 +317,8 @@ class InstanceManager(models.Manager):
 class Instance(CloudResource):
     boot_volume = models.ForeignKey(Volume, on_delete=models.PROTECT, )
     ip_address = models.GenericIPAddressField(null=True, blank=True)
+    console_addr = models.GenericIPAddressField(null=True, blank=True)
+    console_port = models.PositiveIntegerField(null=True, blank=True)
     guac_connection = models.ForeignKey(GuacamoleConnection,
         on_delete=models.SET_NULL, null=True, blank=True)
     username = models.CharField(max_length=20)
@@ -335,9 +337,28 @@ class Instance(CloudResource):
                 self.save()
             return self.ip_address
 
+    def get_console_addr_port(self):
+        if self.console_addr:
+            return self.console_addr
+        else:
+            n = get_nectar()
+            nova_server = n.nova.servers.get(self.id)
+            for key in nova_server.addresses:
+                self.console_addr = nova_server.addresses[key][0]['addr']
+                self.save()
+            return self.console_addr
+
+    def get_console_port(self):
+        if self.console_port:
+            return self.console_port
+        else:
+            n = get_nectar()
+            nova_server = n.nova.servers.get(self.id)
+
     def create_guac_connection(self):
         params = [
-            ('hostname', self.get_ip_addr()),
+            ('hostname', self.get_console_addr()),
+            ('port', self.get_console_port()),
             ('username', self.username),
             ('password', self.password),
             ('security', 'tls'),
