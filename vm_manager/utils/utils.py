@@ -8,10 +8,48 @@ from keystoneauth1 import session
 from keystoneclient import client as keystone_client
 from nectarallocationclient import client as allocation_client
 from novaclient import client as nova_client
+from urllib import parse as urlparse
 
 from django.conf import settings
 from django.utils.crypto import get_random_string
 from django.utils.timezone import utc
+from novaclient.v2.servers import ServerManager
+
+
+class ServerManagerConsoleToken(ServerManager):
+    """ServerManagerConsoleToken
+
+    Extended ServerManager class of the OpenStack Nova client v2 for
+    implementing the available Nova API endpoint '/os-console-auth-tokens'.
+    """
+    def get_console_auth_token_info(self, console_token):
+        """
+        Requests console connection information for specified token
+        """
+        url = '/os-console-auth-tokens/%s' % console_token
+        resp, body = self.api.client.get(url)
+        return self.convert_into_with_meta(body, resp)
+
+    @staticmethod
+    def parse_console_auth_token(access_url, console_type):
+        """
+        Helper function to parse the console token from a console access url.
+        """
+        def _get_url_param_value(url, param):
+            parsed_url = urlparse.urlparse(url).query
+            url_params = urlparse.parse_qs(parsed_url)
+            return url_params.get(param, ['']).pop()
+
+        if console_type == 'novnc':
+            # URL parsing for noVNC console token URLs where the token
+            # parameter is encoded into the path parameter
+            url = _get_url_param_value(access_url, 'path')
+        else:
+            # URL parsing for all other console token URLs where the token
+            # parameter is encoded as usual
+            url = access_url
+
+        return _get_url_param_value(url, 'token')
 
 
 class Nectar(object):
@@ -48,6 +86,8 @@ class Nectar(object):
 
         # Establish clients
         self.nova = nova_client.Client('2', session=sess)
+        # Patch the official Nova ServerManager with the extended one
+        self.nova.servers = ServerManagerConsoleToken(self)
         self.allocation = allocation_client.Client('1', session=sess)
         self.keystone = keystone_client.Client('3', session=sess)
         self.glance = glance_client.Client('2', session=sess)
