@@ -338,36 +338,45 @@ class Instance(CloudResource):
             return self.ip_address
 
     def get_console_addr_port(self):
-        if self.console_addr:
-            return self.console_addr
+        if self.console_addr and self.console_port:
+            return self.console_addr, self.console_port
         else:
             n = get_nectar()
-            nova_server = n.nova.servers.get(self.id)
-            for key in nova_server.addresses:
-                self.console_addr = nova_server.addresses[key][0]['addr']
-                self.save()
-            return self.console_addr
+            console_addr, console_port = n.get_console_connection(self.id)
+            self.console_addr = console_addr
+            self.console_port = console_port
+            self.save()
+            return self.console_addr, self.console_port
 
-    def get_console_port(self):
-        if self.console_port:
-            return self.console_port
-        else:
-            n = get_nectar()
-            nova_server = n.nova.servers.get(self.id)
+    def get_console_protocol(self):
+        n = get_nectar()
+        return n.get_console_protocol()
 
     def create_guac_connection(self):
+        # save IP address of OpenStack instance
+        self.get_ip_addr()
+        # save console connection information of OpenStack instance
+        console_addr, console_port = self.get_console_addr_port()
+        console_protocol = self.get_console_protocol()
+
+        # prepare Guacamole connection parameters
         params = [
-            ('hostname', self.get_console_addr()),
-            ('port', self.get_console_port()),
-            ('username', self.username),
-            ('password', self.password),
-            ('security', 'tls'),
-            ('ignore-cert', 'true'),
-            ('resize-method', 'display-update'),
-            ('enable-drive', 'true'),
-            ('drive-path', f'/var/lib/guacd/shared-drive/{self.id}'),
-            ('create-drive-path', 'true'),
+            ('hostname', console_addr),
+            ('port', console_port)
         ]
+
+        if console_protocol == 'rdp':
+            # RDP connections need additional Guacamole connection parameters
+            params.extend([
+                ('username', self.username),
+                ('password', self.password),
+                ('security', 'tls'),
+                ('ignore-cert', 'true'),
+                ('resize-method', 'display-update'),
+                ('enable-drive', 'true'),
+                ('drive-path', f'/var/lib/guacd/shared-drive/{self.id}'),
+                ('create-drive-path', 'true')
+            ])
 
         for k, v in params:
             gcp, created = GuacamoleConnectionParameter.objects.get_or_create(

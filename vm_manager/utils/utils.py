@@ -1,4 +1,6 @@
+from abc import abstractmethod
 from datetime import datetime, timedelta
+from enum import Enum
 import logging
 
 from cinderclient import client as cinder_client
@@ -93,10 +95,50 @@ class Nectar(object):
         self.glance = glance_client.Client('2', session=sess)
         self.cinder = cinder_client.Client('3', session=sess)
 
+    @abstractmethod
+    def get_console_connection(self, server_id):
+        pass
+
+    @abstractmethod
+    def get_console_protocol(self):
+        pass
+
+
+class NectarConsoleOpenStackNative(Nectar):
+    def get_console_connection(self, server_id):
+        console = self.nova.servers.get_vnc_console(server_id)
+        access_url = console.get('access_url')
+        console_type = console.get('console_type')
+        token = ServerManagerConsoleToken.parse_console_auth_token(
+            access_url, console_type)
+        connection_info = self.nova.servers.get_console_auth_token_info(token)
+        return connection_info.get('host'), connection_info.get('port')
+
+    def get_console_protocol(self):
+        return 'vnc'
+
+
+class NectarConsoleInstanceBuiltin(Nectar):
+    def get_console_connection(self, server_id):
+        nova_server = self.nova.servers.get(server_id)
+        ip_address = None
+        for key in nova_server.addresses:
+            ip_address = nova_server.addresses[key][0]['addr']
+        return ip_address, 5900
+
+    def get_console_protocol(self):
+        return 'rdp'
+
 
 def get_nectar():
     if not hasattr(get_nectar, 'nectar'):
-        get_nectar.nectar = Nectar()
+        console_server = settings.OS_CONSOLE_SERVER
+        if console_server == 'openstack_hypervisor':
+            get_nectar.nectar = NectarConsoleOpenStackNative()
+        elif console_server == 'instance_builtin':
+            get_nectar.nectar = NectarConsoleInstanceBuiltin()
+        else:
+            raise NotImplementedError
     return get_nectar.nectar
 
 
