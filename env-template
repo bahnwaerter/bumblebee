@@ -32,7 +32,7 @@ SITE_URL=http://bumblebee:8000
 #   zone=self.boot_volume.zone.lower()
 #   path=guac_utils.get_connection_path(self.guac_connection)
 # e.g. GUACAMOLE_URL_TEMPLATE=http://{env}-guacamole-{zone}.example.com/{path}
-GUACAMOLE_URL_TEMPLATE=http://bumblebee:8000/guacamole/{env}/{zone}/{path}
+GUACAMOLE_URL_TEMPLATE=http://guacamole:9000/guacamole/{path}
 
 ### Bumblebee OpenID Connect integration config
 
