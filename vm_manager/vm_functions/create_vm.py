@@ -11,8 +11,10 @@ from django.template.loader import render_to_string
 from django.urls import reverse
 from django.utils.timezone import utc
 
+from researcher_desktop.utils.utils import desktops_feature
 from vm_manager.constants import VOLUME_CREATION_TIMEOUT, \
-    INSTANCE_LAUNCH_TIMEOUT, NO_VM, VM_SHELVED, VOLUME_AVAILABLE, ACTIVE
+    INSTANCE_LAUNCH_TIMEOUT, NO_VM, VM_SHELVED, VOLUME_AVAILABLE, ACTIVE, \
+    VM_OKAY
 from vm_manager.utils.expiry import InstanceExpiryPolicy
 from vm_manager.utils.utils import get_nectar, generate_server_name, \
     generate_hostname, generate_password
@@ -309,6 +311,33 @@ def wait_for_instance_active(user, desktop_type, instance, start_time):
         vm_status.save()
         instance.set_expires(
             InstanceExpiryPolicy().initial_expiry(now=instance.created))
+
+        # volume = instance.boot_volume
+        # os = volume.operating_system
+        # hostname = generate_hostname(volume.hostname_id, os)
+        # GET = {
+        #     'ip': instance.get_ip_addr(),
+        #     'hn': hostname,
+        #     'os': os,
+        #     'state': SCRIPT_OKAY,
+        #     'msg': CLOUD_INIT_FINISHED
+        # }
+        # request = {GET}
+        # notify_vm(request, desktops_feature())
+
+        volume = instance.boot_volume
+        # cloud init started
+        volume.checked_in = True
+        volume.save()
+        # cloud init finished
+        volume.ready = True
+        volume.save()
+        vm_status = VMStatus.objects.get_vm_status_by_instance(
+            instance, desktops_feature())
+        vm_status.status = VM_OKAY
+        vm_status.status_progress = 100
+        vm_status.status_message = 'Instance ready'
+        vm_status.save()
     elif (now - start_time > timedelta(seconds=INSTANCE_LAUNCH_TIMEOUT)):
         logger.error(f"Instance took too long to launch: user:{user} "
                      f"desktop:{desktop_type.id} instance:{instance} "

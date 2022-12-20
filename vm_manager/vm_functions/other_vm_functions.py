@@ -7,9 +7,11 @@ import novaclient
 from django.utils.timezone import utc
 
 from vm_manager.constants import ACTIVE, SHUTDOWN, REBOOT_HARD, \
-    REBOOT_CONFIRM_WAIT_SECONDS, REBOOT_CONFIRM_RETRIES
-from vm_manager.models import Instance, VMStatus
+    REBOOT_CONFIRM_WAIT_SECONDS, REBOOT_CONFIRM_RETRIES, VM_SUPERSIZED, VM_OKAY, \
+    WF_SUCCESS
+from vm_manager.models import Instance, VMStatus, Resize, EXP_EXPIRING
 from vm_manager.utils.utils import get_nectar
+from vm_manager.vm_functions.resize_vm import end_resize
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +71,24 @@ def _check_power_state(retries, instance, target_status, requesting_feature):
         vm_status.status_message = "Instance restarted; waiting for reboot"
         vm_status.save()
         # The final stage is done in response to a phone_home request
+
+        volume = instance.boot_volume
+
+        volume.ready = True
+        volume.save()
+
+        resize = Resize.objects.get_latest_resize(instance.id)
+        status = VM_SUPERSIZED if resize and not resize.reverted else VM_OKAY
+        if resize and resize.expiration \
+                and resize.expiration.stage == EXP_EXPIRING:
+            # This marks the expiration complete for a expiry-triggered downsize
+            end_resize(instance, status, WF_SUCCESS)
+
+        vm_status.status_progress = 100
+        vm_status.status_message = 'Instance ready'
+        vm_status.status = status
+        vm_status.save()
+
     elif retries > 0:
         scheduler = django_rq.get_scheduler('default')
         scheduler.enqueue_in(

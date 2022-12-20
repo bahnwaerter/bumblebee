@@ -353,8 +353,6 @@ class Instance(CloudResource):
         return n.get_console_protocol()
 
     def create_guac_connection(self):
-        # save IP address of OpenStack instance
-        self.get_ip_addr()
         # save console connection information of OpenStack instance
         console_addr, console_port = self.get_console_addr_port()
         console_protocol = self.get_console_protocol()

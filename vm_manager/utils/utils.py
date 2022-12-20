@@ -1,7 +1,5 @@
 from abc import abstractmethod
 from datetime import datetime, timedelta
-from enum import Enum
-import logging
 
 from cinderclient import client as cinder_client
 from glanceclient import client as glance_client
@@ -87,9 +85,9 @@ class Nectar(object):
         self.roles = auth_ref.role_names
 
         # Establish clients
-        self.nova = nova_client.Client('2', session=sess)
+        self.nova = nova_client.Client('2.31', session=sess)
         # Patch the official Nova ServerManager with the extended one
-        self.nova.servers = ServerManagerConsoleToken(self)
+        self.nova.servers = ServerManagerConsoleToken(self.nova)
         self.allocation = allocation_client.Client('1', session=sess)
         self.keystone = keystone_client.Client('3', session=sess)
         self.glance = glance_client.Client('2', session=sess)
@@ -106,12 +104,14 @@ class Nectar(object):
 
 class NectarConsoleOpenStackNative(Nectar):
     def get_console_connection(self, server_id):
-        console = self.nova.servers.get_vnc_console(server_id)
-        access_url = console.get('access_url')
-        console_type = console.get('console_type')
+        resp = self.nova.servers.get_vnc_console(server_id, 'novnc')
+        console = resp.get('remote_console')
+        access_url = console.get('url')
+        console_type = console.get('type')
         token = ServerManagerConsoleToken.parse_console_auth_token(
             access_url, console_type)
-        connection_info = self.nova.servers.get_console_auth_token_info(token)
+        resp = self.nova.servers.get_console_auth_token_info(token)
+        connection_info = resp.get('console')
         return connection_info.get('host'), connection_info.get('port')
 
     def get_console_protocol(self):
