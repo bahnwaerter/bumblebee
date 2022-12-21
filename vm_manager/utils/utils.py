@@ -144,15 +144,36 @@ class NectarConsoleInstanceBuiltin(Nectar):
         return NectarConsoleInstanceBuiltin.PROTOCOL
 
 
+class NectarFactory(object):
+    """
+    Factory to register available Nectar console implementations and to create
+    selected console depending on the OS_CONSOLE_SERVER setting.
+    """
+    def __init__(self):
+        self._nectar_creators = {}
+
+    def register(self, console_server, creator):
+        self._nectar_creators[console_server] = creator
+
+    def create(self):
+        console_server = settings.OS_CONSOLE_SERVER
+        creator = self._nectar_creators.get(console_server)
+        if not creator:
+            raise ValueError(console_server)
+        return creator()
+
+
+# Register all OpenStack console server implementations
+nectar_factory = NectarFactory()
+nectar_factory.register('openstack_hypervisor',
+                        NectarConsoleOpenStackHypervisor)
+nectar_factory.register('instance_builtin',
+                        NectarConsoleInstanceBuiltin)
+
+
 def get_nectar():
     if not hasattr(get_nectar, 'nectar'):
-        console_server = settings.OS_CONSOLE_SERVER
-        if console_server == 'openstack_hypervisor':
-            get_nectar.nectar = NectarConsoleOpenStackNative()
-        elif console_server == 'instance_builtin':
-            get_nectar.nectar = NectarConsoleInstanceBuiltin()
-        else:
-            raise NotImplementedError
+        get_nectar.nectar = nectar_factory.create()
     return get_nectar.nectar
 
 
