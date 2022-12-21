@@ -102,7 +102,14 @@ class Nectar(object):
         pass
 
 
-class NectarConsoleOpenStackNative(Nectar):
+class NectarConsoleOpenStackHypervisor(Nectar):
+    """NectarConsoleOpenStackHypervisor
+
+    Nectar OpenStack client implementing the native VNC console provided by
+    OpenStack (reusing the provided VNC server of the hypervisor)
+    """
+    PROTOCOL = 'vnc'
+
     def get_console_connection(self, server_id):
         resp = self.nova.servers.get_vnc_console(server_id, 'novnc')
         console = resp.get('remote_console')
@@ -115,10 +122,17 @@ class NectarConsoleOpenStackNative(Nectar):
         return connection_info.get('host'), connection_info.get('port')
 
     def get_console_protocol(self):
-        return 'vnc'
+        return NectarConsoleOpenStackHypervisor.PROTOCOL
 
 
 class NectarConsoleInstanceBuiltin(Nectar):
+    """NectarConsoleInstanceBuiltin
+
+    Nectar OpenStack client implementing the RDP console built into a cloud
+    server's instance (reusing the integrated RDP server from a cloud instance)
+    """
+    PROTOCOL = 'rdp'
+
     def get_console_connection(self, server_id):
         nova_server = self.nova.servers.get(server_id)
         ip_address = None
@@ -127,7 +141,7 @@ class NectarConsoleInstanceBuiltin(Nectar):
         return ip_address, 5900
 
     def get_console_protocol(self):
-        return 'rdp'
+        return NectarConsoleInstanceBuiltin.PROTOCOL
 
 
 def get_nectar():
